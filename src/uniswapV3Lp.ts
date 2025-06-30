@@ -274,6 +274,82 @@ class UniswapV3Lp {
     );
   }
 
+  // 通过tokenId计算当前头寸的费用
+  public async getFeesByTokenId(tokenId: bigint): Promise<{
+    fee0: bigint;
+    fee1: bigint;
+  }> {
+    const position = await this.positionManager.getPositions(tokenId);
+    const {
+      tickLower,
+      tickUpper,
+      liquidity,
+      feeGrowthInside0LastX128,
+      feeGrowthInside1LastX128,
+    } = position;
+
+    // 获取当前池的slot0信息
+    const slot0 = await this.uniswapV3Pool.getSlot0();
+    const currentTick = slot0.tick;
+
+    // 获取全局费用增长信息
+    const feeGrowthGlobal0X128 =
+      await this.uniswapV3Pool.poolContract.feeGrowthGlobal0X128();
+    const feeGrowthGlobal1X128 =
+      await this.uniswapV3Pool.poolContract.feeGrowthGlobal1X128();
+
+    // 获取tick信息
+    const tickLowerInfo = await this.uniswapV3Pool.getTick(tickLower);
+    const tickUpperInfo = await this.uniswapV3Pool.getTick(tickUpper);
+
+    // 计算头寸范围内的费用增长
+    let feeGrowthInside0X128: bigint;
+    let feeGrowthInside1X128: bigint;
+
+    if (currentTick < tickLower) {
+      // 当前价格在头寸范围下方
+      feeGrowthInside0X128 =
+        tickLowerInfo.feeGrowthOutside0X128 -
+        tickUpperInfo.feeGrowthOutside0X128;
+      feeGrowthInside1X128 =
+        tickLowerInfo.feeGrowthOutside1X128 -
+        tickUpperInfo.feeGrowthOutside1X128;
+    } else if (currentTick >= tickUpper) {
+      // 当前价格在头寸范围上方
+      feeGrowthInside0X128 =
+        tickUpperInfo.feeGrowthOutside0X128 -
+        tickLowerInfo.feeGrowthOutside0X128;
+      feeGrowthInside1X128 =
+        tickUpperInfo.feeGrowthOutside1X128 -
+        tickLowerInfo.feeGrowthOutside1X128;
+    } else {
+      // 当前价格在头寸范围内
+      feeGrowthInside0X128 =
+        feeGrowthGlobal0X128 -
+        tickLowerInfo.feeGrowthOutside0X128 -
+        tickUpperInfo.feeGrowthOutside0X128;
+      feeGrowthInside1X128 =
+        feeGrowthGlobal1X128 -
+        tickLowerInfo.feeGrowthOutside1X128 -
+        tickUpperInfo.feeGrowthOutside1X128;
+    }
+
+    // 计算费用增长差值
+    const feeGrowthDelta0X128 = feeGrowthInside0X128 - feeGrowthInside0LastX128;
+    const feeGrowthDelta1X128 = feeGrowthInside1X128 - feeGrowthInside1LastX128;
+
+    // 计算实际费用 (fees = liquidity * feeGrowthDelta / 2^128)
+    const Q128 = BigInt(2) ** BigInt(128);
+    const fee0 = (liquidity * feeGrowthDelta0X128) / Q128;
+    const fee1 = (liquidity * feeGrowthDelta1X128) / Q128;
+
+    logger.debug(
+      `Calculated fees for tokenId ${tokenId}: fee0=${fee0}, fee1=${fee1}, liquidity=${liquidity}`
+    );
+
+    return { fee0, fee1 };
+  }
+
   /**
    * 检查现在的流动性是否在设定区间内
    * @param tokenId - The token ID of the position to check.
