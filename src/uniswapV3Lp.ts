@@ -198,6 +198,24 @@ class UniswapV3PositionManagerExtended extends UniswapV3PositionManager {
       logger.info(`No fees to collect for position ${tokenId}.`);
     }
   }
+
+  // 通过staticCall调用获取头寸费用
+  public async getFeesByTokenId(
+    tokenId: bigint
+  ): Promise<{ fee0: bigint; fee1: bigint }> {
+    const uint128Max = BigInt("340282366920938463463374607431768211455");
+    const [amount0, amount1] =
+      await this.positionManagerContract.collect.staticCall({
+        tokenId: tokenId,
+        recipient: this.wallet.address,
+        amount0Max: uint128Max, // 最大值为uint128的最大值
+        amount1Max: uint128Max, // 最大值为uint128的最大值
+      });
+    const fee0 = amount0;
+    const fee1 = amount1;
+    logger.debug(`Fees for tokenId ${tokenId}: fee0=${fee0}, fee1=${fee1}`);
+    return { fee0, fee1 };
+  }
 }
 
 // 目前只支持一个Pool
@@ -226,6 +244,7 @@ class UniswapV3Lp {
     | UniswapV3PositionManager.PositionResponse
     | undefined = undefined;
   public hedgeAmountReadable?: number; // OKX对冲的数量,
+  public feeCheckInterval?: NodeJS.Timeout; // 定时检查费用的定时器
 
   /**
    * Creates an instance of UniswapV3Lp.
@@ -272,82 +291,6 @@ class UniswapV3Lp {
       this.pool.token1,
       this.wallet
     );
-  }
-
-  // 通过tokenId计算当前头寸的费用
-  public async getFeesByTokenId(tokenId: bigint): Promise<{
-    fee0: bigint;
-    fee1: bigint;
-  }> {
-    const position = await this.positionManager.getPositions(tokenId);
-    const {
-      tickLower,
-      tickUpper,
-      liquidity,
-      feeGrowthInside0LastX128,
-      feeGrowthInside1LastX128,
-    } = position;
-
-    // 获取当前池的slot0信息
-    const slot0 = await this.uniswapV3Pool.getSlot0();
-    const currentTick = slot0.tick;
-
-    // 获取全局费用增长信息
-    const feeGrowthGlobal0X128 =
-      await this.uniswapV3Pool.poolContract.feeGrowthGlobal0X128();
-    const feeGrowthGlobal1X128 =
-      await this.uniswapV3Pool.poolContract.feeGrowthGlobal1X128();
-
-    // 获取tick信息
-    const tickLowerInfo = await this.uniswapV3Pool.getTick(tickLower);
-    const tickUpperInfo = await this.uniswapV3Pool.getTick(tickUpper);
-
-    // 计算头寸范围内的费用增长
-    let feeGrowthInside0X128: bigint;
-    let feeGrowthInside1X128: bigint;
-
-    if (currentTick < tickLower) {
-      // 当前价格在头寸范围下方
-      feeGrowthInside0X128 =
-        tickLowerInfo.feeGrowthOutside0X128 -
-        tickUpperInfo.feeGrowthOutside0X128;
-      feeGrowthInside1X128 =
-        tickLowerInfo.feeGrowthOutside1X128 -
-        tickUpperInfo.feeGrowthOutside1X128;
-    } else if (currentTick >= tickUpper) {
-      // 当前价格在头寸范围上方
-      feeGrowthInside0X128 =
-        tickUpperInfo.feeGrowthOutside0X128 -
-        tickLowerInfo.feeGrowthOutside0X128;
-      feeGrowthInside1X128 =
-        tickUpperInfo.feeGrowthOutside1X128 -
-        tickLowerInfo.feeGrowthOutside1X128;
-    } else {
-      // 当前价格在头寸范围内
-      feeGrowthInside0X128 =
-        feeGrowthGlobal0X128 -
-        tickLowerInfo.feeGrowthOutside0X128 -
-        tickUpperInfo.feeGrowthOutside0X128;
-      feeGrowthInside1X128 =
-        feeGrowthGlobal1X128 -
-        tickLowerInfo.feeGrowthOutside1X128 -
-        tickUpperInfo.feeGrowthOutside1X128;
-    }
-
-    // 计算费用增长差值
-    const feeGrowthDelta0X128 = feeGrowthInside0X128 - feeGrowthInside0LastX128;
-    const feeGrowthDelta1X128 = feeGrowthInside1X128 - feeGrowthInside1LastX128;
-
-    // 计算实际费用 (fees = liquidity * feeGrowthDelta / 2^128)
-    const Q128 = BigInt(2) ** BigInt(128);
-    const fee0 = (liquidity * feeGrowthDelta0X128) / Q128;
-    const fee1 = (liquidity * feeGrowthDelta1X128) / Q128;
-
-    logger.debug(
-      `Calculated fees for tokenId ${tokenId}: fee0=${fee0}, fee1=${fee1}, liquidity=${liquidity}`
-    );
-
-    return { fee0, fee1 };
   }
 
   /**
@@ -648,6 +591,63 @@ class UniswapV3Lp {
   }
 
   /**
+   * 定期检查费用的异步任务
+   * @param tokenId - 头寸ID
+   */
+  private async checkFeesTask(tokenId: bigint): Promise<void> {
+    try {
+      const fees = await this.positionManager.getFeesByTokenId(tokenId);
+      logger.info(
+        `Fees for tokenId ${tokenId}: fee0=${fees.fee0}, fee1=${fees.fee1}`
+      );
+    } catch (error) {
+      logger.error(
+        `Error checking fees for tokenId ${tokenId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * 启动费用检查定时任务
+   * @param tokenId - 头寸ID
+   * @param intervalMinutes - 检查间隔（分钟），默认30分钟
+   */
+  private startFeeCheckTimer(
+    tokenId: bigint,
+    intervalMinutes: number = 30
+  ): void {
+    // 清除之前的定时器
+    if (this.feeCheckInterval) {
+      clearInterval(this.feeCheckInterval);
+    }
+
+    logger.info(
+      `Starting fee check timer for tokenId ${tokenId}, interval: ${intervalMinutes} minutes`
+    );
+
+    // 立即执行一次
+    this.checkFeesTask(tokenId);
+
+    // 设置定时任务
+    this.feeCheckInterval = setInterval(async () => {
+      await this.checkFeesTask(tokenId);
+    }, intervalMinutes * 60 * 1000); // 转换为毫秒
+  }
+
+  /**
+   * 停止费用检查定时任务
+   */
+  private stopFeeCheckTimer(): void {
+    if (this.feeCheckInterval) {
+      clearInterval(this.feeCheckInterval);
+      this.feeCheckInterval = undefined;
+      logger.info("Fee check timer stopped");
+    }
+  }
+
+  /**
    * run the Uniswap V3 LP service.
    */
   public async run() {
@@ -706,6 +706,7 @@ class UniswapV3Lp {
       if (tokenIds.length > 0) {
         tokenId = tokenIds[0]; // 目前只处理第一个tokenId
       }
+
       while (true) {
         try {
           // 这里可以添加更多的逻辑，比如定时检查池的状态，或者根据市场情况进行流动性管理
@@ -713,19 +714,35 @@ class UniswapV3Lp {
             `Current pool: ${this.pool.token0.address} - ${this.pool.token1.address}, fee: ${this.pool.fee}, tokenId: ${tokenId}`
           );
           if (tokenId !== undefined) {
+            // 启动费用检查定时任务（如果还没有启动）
+            if (!this.feeCheckInterval) {
+              this.startFeeCheckTimer(tokenId);
+            }
+
             // 检查流动性是否在设定区间内
             const inRange = await this.isLiquidityInRange(tokenId);
             if (!inRange) {
               logger.warn(
                 `Liquidity for tokenId ${tokenId} is out of range. Consider removing position.`
               );
+              // 停止旧的费用检查定时器
+              this.stopFeeCheckTimer();
+
               // 移除流动性并且创建新的头寸
               await this.positionManager.removeLiquidity(tokenId);
               // 收集费用
               await this.positionManager.collectAllFees(tokenId);
+              // burn position
+              await this.positionManager.positionManagerContract.burn(tokenId);
+
+              // 创建新的头寸
               tokenId = await this.createPosition();
               // 执行OKX对冲
               await this.executeOkxHedge();
+
+              // 为新的tokenId启动费用检查定时器
+              this.startFeeCheckTimer(tokenId);
+
               logger.info(`New position created with tokenId: ${tokenId}.`);
             } else {
               logger.debug(`Liquidity for tokenId ${tokenId} is in range.`);
@@ -737,6 +754,10 @@ class UniswapV3Lp {
             tokenId = await this.createPosition();
             // 执行OKX对冲
             await this.executeOkxHedge();
+
+            // 启动费用检查定时任务
+            this.startFeeCheckTimer(tokenId);
+
             logger.info(`New position created with tokenId: ${tokenId}.`);
           }
         } catch (error) {
@@ -745,7 +766,8 @@ class UniswapV3Lp {
               error instanceof Error ? error.message : String(error)
             }`
           );
-          // 如果发生错误，可以选择重试或退出
+          // 如果发生错误，停止费用检查定时器
+          this.stopFeeCheckTimer();
           // 这里可以添加重试逻辑
         } finally {
           logger.debug(
@@ -758,6 +780,8 @@ class UniswapV3Lp {
       }
     } catch (error) {
       logger.error("Error running Uniswap V3 LP service:", error);
+      // 清理定时器
+      this.stopFeeCheckTimer();
     }
   }
 }
