@@ -178,6 +178,26 @@ class UniswapV3PositionManagerExtended extends UniswapV3PositionManager {
     await tx.wait(1);
     logger.info(`Removed liquidity for position ${tokenId}.`);
   }
+
+  // 收集全部的费用
+  public async collectAllFees(tokenId: bigint) {
+    const position = await this.positionManagerContract.positions(tokenId);
+    // 收集费用
+    if (position.tokensOwed0 > 0n || position.tokensOwed1 > 0n) {
+      const tx = await this.positionManagerContract.collect({
+        tokenId: tokenId,
+        recipient: this.wallet.address,
+        amount0Max: position.tokensOwed0,
+        amount1Max: position.tokensOwed1,
+      });
+      await tx.wait(1);
+      logger.info(
+        `Collected fees for position ${tokenId}: ${position.tokensOwed0} token0, ${position.tokensOwed1} token1.`
+      );
+    } else {
+      logger.info(`No fees to collect for position ${tokenId}.`);
+    }
+  }
 }
 
 // 目前只支持一个Pool
@@ -625,6 +645,8 @@ class UniswapV3Lp {
               );
               // 移除流动性并且创建新的头寸
               await this.positionManager.removeLiquidity(tokenId);
+              // 收集费用
+              await this.positionManager.collectAllFees(tokenId);
               tokenId = await this.createPosition();
               // 执行OKX对冲
               await this.executeOkxHedge();
