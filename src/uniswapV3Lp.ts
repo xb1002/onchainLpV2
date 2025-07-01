@@ -217,6 +217,22 @@ class UniswapV3PositionManagerExtended extends UniswapV3PositionManager {
     logger.debug(`Fees for tokenId ${tokenId}: fee0=${fee0}, fee1=${fee1}`);
     return { fee0, fee1 };
   }
+
+  // 添加获取最新的tokenId的方法
+  public async getLatestTokenId(): Promise<bigint | undefined> {
+    const balance = await this.positionManagerContract.balanceOf(
+      this.wallet.address
+    );
+    if (balance === 0n) {
+      logger.warn("No positions found for the wallet.");
+      return undefined;
+    }
+    const tokenId = await this.positionManagerContract.tokenOfOwnerByIndex(
+      this.wallet.address,
+      balance - 1n // 获取最后一个tokenId
+    );
+    return tokenId;
+  }
 }
 
 // 目前只支持一个Pool
@@ -468,17 +484,11 @@ class UniswapV3Lp {
 
       logger.info("Minting new position...");
 
-      // 创建头寸
-      const { tokenId } = (await this.positionManager.mintPosition(
-        mintParams,
-        true
-      )) as UniswapV3PositionManager.MintPositionResponse;
       const createPositionTx = (await this.positionManager.mintPosition(
         mintParams
       )) as TransactionResponse;
       await createPositionTx.wait(1); // 等待交易确认
 
-      logger.info(`Successfully created position with tokenId: ${tokenId}`);
       // 剩余余额
       const balance0MintAfter = await this.token0Contract!.balanceOf(
         this.wallet.address
@@ -490,10 +500,14 @@ class UniswapV3Lp {
         `Amounts after mint - ${this.pool.token0.symbol} Amount: ${balance0MintAfter} , ${this.pool.token1.symbol} Amount: ${balance1MintAfter}`
       );
 
-      // 更新当前头寸信息
-      this.currentPosition = await this.positionManager.getPositions(tokenId);
+      // 获取新创建的头寸ID
+      const tokenId = await this.positionManager.getLatestTokenId();
 
-      return tokenId;
+      logger.info(`Successfully created position with tokenId: ${tokenId}`);
+      // 更新当前头寸信息
+      this.currentPosition = await this.positionManager.getPositions(tokenId!);
+
+      return tokenId!;
     } catch (error) {
       logger.error("Error creating position and OKX hedge:", error);
       throw new Error(
