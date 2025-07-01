@@ -23,6 +23,9 @@ const logger = createLoggerWithFeishu(
   config.loggerConfig.webhookUrl
 );
 
+const feeCollectConfig = config.feeCollectConfig;
+const increaseLiquidityConfig = config.increaseLiquidityConfig;
+
 namespace UniswapV3Lp {
   export type exchangeType = "cex" | "dex";
   //   export type OrderInfo = {};
@@ -262,6 +265,7 @@ class UniswapV3Lp {
     | undefined = undefined;
   public hedgeAmountReadable?: number; // OKX对冲的数量,
   public feeCheckInterval?: NodeJS.Timeout; // 定时检查费用的定时器
+  public increaseLiquidityInterval?: NodeJS.Timeout; // 定时检查流动性的定时器
 
   /**
    * Creates an instance of UniswapV3Lp.
@@ -506,6 +510,7 @@ class UniswapV3Lp {
       logger.info(`Successfully created position with tokenId: ${tokenId}`);
       // 更新当前头寸信息
       this.currentPosition = await this.positionManager.getPositions(tokenId!);
+      logger.info(`Current position details: ${this.currentPosition}`);
 
       return tokenId!;
     } catch (error) {
@@ -606,7 +611,7 @@ class UniswapV3Lp {
   }
 
   /**
-   * 定期检查费用的异步任务
+   * 定期检查费用的异步任务,如果fee0/fee1大于feeCollectConfig.collectMinFee0/collectMinFee1, 则收集费用
    * @param tokenId - 头寸ID
    */
   private async checkFeesTask(tokenId: bigint): Promise<void> {
@@ -615,9 +620,66 @@ class UniswapV3Lp {
       logger.info(
         `Fees for tokenId ${tokenId}: fee0=${fees.fee0}, fee1=${fees.fee1}`
       );
+
+      // 检查是否需要收集费用
+      if (
+        fees.fee0 > config.feeCollectConfig.collectMinFee0 &&
+        fees.fee1 > config.feeCollectConfig.collectMinFee1
+      ) {
+        logger.info(`Collecting fees for tokenId ${tokenId}`);
+        await this.positionManager.collectFees({
+          tokenId: tokenId,
+          recipient: this.wallet.address,
+          amount0Max: fees.fee0,
+          amount1Max: fees.fee1,
+        });
+        logger.info(`Fees collected for tokenId ${tokenId}`);
+      }
     } catch (error) {
       logger.error(
         `Error checking fees for tokenId ${tokenId}: ${
+          error instanceof Error ? error.message : String(error)
+        }`
+      );
+    }
+  }
+
+  /**
+   * 定期检查流动性是否需要添加的异步任务
+   * 如果amount0/amount1大于 increaseLiquidityConfig.increaseMinAmount0/increaseMinAmount1, 则添加流动性
+   * @param tokenId - 头寸ID
+   */
+  private async checkLiquidityTask(tokenId: bigint): Promise<void> {
+    try {
+      // 检查余额
+      const amount0 = await this.token0Contract!.balanceOf(this.wallet.address);
+      const amount1 = await this.token1Contract!.balanceOf(this.wallet.address);
+      logger.debug(
+        `increaseLiquidity check, Amount0: ${amount0}, Amount1: ${amount1}`
+      );
+
+      // 检查是否需要添加流动性
+      if (
+        amount0 > config.increaseLiquidityConfig.increaseLiquidityMinAmount0 &&
+        amount1 > config.increaseLiquidityConfig.increaseLiquidityMinAmount1
+      ) {
+        logger.info(`Adding liquidity for tokenId ${tokenId}`);
+        await this.positionManager.increaseLiquidity({
+          tokenId: tokenId,
+          amount0Desired: amount0,
+          amount1Desired: amount1,
+          amount0Min: 0, // 最小值可以根据实际情况调整
+          amount1Min: 0, // 最小值可以根据实际情况调整
+          deadline: Math.floor(Date.now() / 1000) + 3600, // 1小时后过期
+        });
+        logger.info(`Liquidity added for tokenId ${tokenId}`);
+        // 查看position
+        const position = await this.positionManager.getPositions(tokenId);
+        logger.info(`Position after adding liquidity: ${position}`);
+      }
+    } catch (error) {
+      logger.error(
+        `Error checking liquidity for tokenId ${tokenId}: ${
           error instanceof Error ? error.message : String(error)
         }`
       );
@@ -629,36 +691,53 @@ class UniswapV3Lp {
    * @param tokenId - 头寸ID
    * @param intervalMinutes - 检查间隔（分钟），默认30分钟
    */
-  private startFeeCheckTimer(
+  private startCheckTimer(
     tokenId: bigint,
-    intervalMinutes: number = 30
+    feeIntervalMinutes: number = 30,
+    increaseLiquidityIntervalMinutes: number = 120
   ): void {
     // 清除之前的定时器
     if (this.feeCheckInterval) {
       clearInterval(this.feeCheckInterval);
     }
+    if (this.increaseLiquidityInterval) {
+      clearInterval(this.increaseLiquidityInterval);
+    }
 
     logger.info(
-      `Starting fee check timer for tokenId ${tokenId}, interval: ${intervalMinutes} minutes`
+      `Starting fee check timer for tokenId ${tokenId} with interval ${feeIntervalMinutes} minutes`
+    );
+    logger.info(
+      `Starting liquidity increase check timer for tokenId ${tokenId} with interval ${increaseLiquidityIntervalMinutes} minutes`
     );
 
     // 立即执行一次
     this.checkFeesTask(tokenId);
+    this.checkLiquidityTask(tokenId);
 
     // 设置定时任务
     this.feeCheckInterval = setInterval(async () => {
       await this.checkFeesTask(tokenId);
-    }, intervalMinutes * 60 * 1000); // 转换为毫秒
+    }, feeIntervalMinutes * 60 * 1000); // 转换为毫秒
+
+    this.increaseLiquidityInterval = setInterval(async () => {
+      await this.checkLiquidityTask(tokenId);
+    }, increaseLiquidityIntervalMinutes * 60 * 1000); // 转换为毫秒
   }
 
   /**
-   * 停止费用检查定时任务
+   * 停止检查定时任务
    */
-  private stopFeeCheckTimer(): void {
+  private stopCheckTimer(): void {
     if (this.feeCheckInterval) {
       clearInterval(this.feeCheckInterval);
       this.feeCheckInterval = undefined;
       logger.info("Fee check timer stopped");
+    }
+    if (this.increaseLiquidityInterval) {
+      clearInterval(this.increaseLiquidityInterval);
+      this.increaseLiquidityInterval = undefined;
+      logger.info("Liquidity increase check timer stopped");
     }
   }
 
@@ -729,9 +808,12 @@ class UniswapV3Lp {
             `Current pool: ${this.pool.token0.address} - ${this.pool.token1.address}, fee: ${this.pool.fee}, tokenId: ${tokenId}`
           );
           if (tokenId !== undefined) {
-            // 启动费用检查定时任务（如果还没有启动）
+            // 启动检查定时任务（如果还没有启动）
             if (!this.feeCheckInterval) {
-              this.startFeeCheckTimer(tokenId);
+              this.startCheckTimer(tokenId);
+            }
+            if (!this.increaseLiquidityInterval) {
+              this.startCheckTimer(tokenId);
             }
 
             // 检查流动性是否在设定区间内
@@ -740,8 +822,8 @@ class UniswapV3Lp {
               logger.warn(
                 `Liquidity for tokenId ${tokenId} is out of range. Consider removing position.`
               );
-              // 停止旧的费用检查定时器
-              this.stopFeeCheckTimer();
+              // 停止旧的检查定时器
+              this.stopCheckTimer();
 
               // 移除流动性并且创建新的头寸
               await this.positionManager.removeLiquidity(tokenId);
@@ -755,8 +837,8 @@ class UniswapV3Lp {
               // 执行OKX对冲
               await this.executeOkxHedge();
 
-              // 为新的tokenId启动费用检查定时器
-              this.startFeeCheckTimer(tokenId);
+              // 为新的tokenId启动检查定时器
+              this.startCheckTimer(tokenId);
 
               logger.info(`New position created with tokenId: ${tokenId}.`);
             } else {
@@ -770,8 +852,8 @@ class UniswapV3Lp {
             // 执行OKX对冲
             await this.executeOkxHedge();
 
-            // 启动费用检查定时任务
-            this.startFeeCheckTimer(tokenId);
+            // 启动检查定时任务
+            this.startCheckTimer(tokenId);
 
             logger.info(`New position created with tokenId: ${tokenId}.`);
           }
@@ -781,8 +863,8 @@ class UniswapV3Lp {
               error instanceof Error ? error.message : String(error)
             }`
           );
-          // 如果发生错误，停止费用检查定时器
-          this.stopFeeCheckTimer();
+          // 如果发生错误，停止检查定时器
+          this.stopCheckTimer();
           // 这里可以添加重试逻辑
         } finally {
           logger.debug(
@@ -796,7 +878,7 @@ class UniswapV3Lp {
     } catch (error) {
       logger.error("Error running Uniswap V3 LP service:", error);
       // 清理定时器
-      this.stopFeeCheckTimer();
+      this.stopCheckTimer();
     }
   }
 }

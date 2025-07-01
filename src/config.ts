@@ -27,10 +27,21 @@ const loggerConfig = {
   webhookUrl:
     "https://open.feishu.cn/open-apis/bot/v2/hook/011986cf-824b-44fc-8577-9238d3b63ce7",
 };
+
+const feeCollectConfig = {
+  collectMinFee0: BigInt(Math.floor(0.4 * 1e15)), // 当token0（这里是WETH）大于此值时，收取费用
+  collectMinFee1: BigInt(Math.floor(1e6)), // 当token1（这里是USDC）大于此值时，收取费用
+};
+const increaseLiquidityConfig = {
+  increaseLiquidityMinAmount0: BigInt(Math.floor(1e15)), // 当token0（这里是WETH）大于此值时，增加流动性
+  increaseLiquidityMinAmount1: BigInt(Math.floor(2.5 * 1e6)), // 当token1（这里是USDC）大于此值时，增加流动性
+};
 export const config = {
   pool,
   swapRouterAddress,
   positionManagerAddress,
   loggerConfig,
   baseToken,
+  feeCollectConfig,
+  increaseLiquidityConfig,
 };
