@@ -830,7 +830,13 @@ class UniswapV3Lp {
               // 收集费用
               await this.positionManager.collectAllFees(tokenId);
               // burn position
-              await this.positionManager.positionManagerContract.burn(tokenId);
+              const burnTx =
+                await this.positionManager.positionManagerContract.burn(
+                  tokenId
+                );
+              await burnTx.wait(1);
+              tokenId = undefined; // 清除tokenId
+              logger.info(`Position with tokenId ${tokenId} burned.`);
 
               // 创建新的头寸
               tokenId = await this.createPosition();
