@@ -24,6 +24,8 @@ const loggerConfig = {
   level: "debug",
   logFlag: true,
   logFile: "logs/uniswapV3Lp.log",
+  webhookUrl:
+    "https://open.feishu.cn/open-apis/bot/v2/hook/011986cf-824b-44fc-8577-9238d3b63ce7",
 };
 export const config = {
   pool,

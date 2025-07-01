@@ -1,7 +1,7 @@
 import { SwapRouter } from "./lib/swapRouter";
 import { UniswapV3Pool } from "./lib/uniswapV3Pool";
 import { ERC20, WETH9 } from "./lib/token";
-import { createLogger } from "./utils/logger";
+import { createLogger, createLoggerWithFeishu } from "./utils/logger";
 import { Wallet, TransactionResponse } from "ethers";
 import { UniswapV3PositionManager } from "./lib/uniswapV3PositionManager";
 import {
@@ -15,11 +15,12 @@ import { RestClient as OkxRestClient } from "okx-api";
 import { config } from "./config";
 
 // 配置日志
-const logger = createLogger(
+const logger = createLoggerWithFeishu(
   config.loggerConfig.name,
   config.loggerConfig.level,
   config.loggerConfig.logFlag,
-  config.loggerConfig.logFile
+  config.loggerConfig.logFile,
+  config.loggerConfig.webhookUrl
 );
 
 namespace UniswapV3Lp {
